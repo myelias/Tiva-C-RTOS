@@ -1,0 +1,776 @@
+echo "# Tiva-C-RTOS" >> README.md
+git init
+git add README.md
+git commit -m "first commit"
+git branch -M main
+git remote add origin https://github.com/myelias/Tiva-C-RTOS.git
+git push -u origin main
+
+
+/*Code created by Martin Elias and Sleman Elhajj*/
+/*Fall 2020*/
+
+/* XDCtools Header files */
+#include <xdc/std.h>
+#include <xdc/runtime/System.h>
+#include <xdc/cfg/global.h>
+
+/* BIOS Header files */
+#include <ti/sysbios/BIOS.h>
+#include <ti/sysbios/knl/Task.h>
+
+/* TI-RTOS Header files */
+#include <ti/drivers/GPIO.h>
+#include <ti/drivers/UART.h>
+#include <ti/sysbios/knl/Semaphore.h>
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "driverlib/pwm.h"
+#include "inc/hw_gpio.h"
+
+#include "inc/hw_memmap.h"
+#include "inc/hw_types.h"
+#include "inc/hw_gpio.h"
+#include "driverlib/gpio.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/uart.h"
+#include <inc/hw_ints.h>
+#include <driverlib/interrupt.h>
+#include "driverlib/adc.h"
+#include "driverlib/timer.h"
+#include "utils/uartstdio.h"
+#include "utils/uartstdio.c"
+
+
+
+/* Example/Board Header files */
+#include "Board.h"
+#include <driverlib/uart.h>
+#include <driverlib/gpio.h>
+
+#include <math.h>
+char globalcmdbuffer[16];
+
+unsigned long distanceR[1];
+unsigned long distanceF[1];
+float resultsLight[1];
+unsigned long ulPeriodWall;
+int i = 0;
+float distanceRC;
+float distanceFC;
+float distanceRC1;
+float distanceFC1;
+float WallSetPoint = 7.1;
+float propError;
+float derError=0;
+float intError=0;
+float curP;
+float curI;
+float curD;
+unsigned long countPIDLOOPS=0;
+float prevErrorValue = 0.01;
+float leftWheelSpeed;
+float rightWheelSpeed;
+float properror;
+float speedCorrection;
+int pidLoopDebugcounter = 0;
+float kp = 300;
+float ki = 0.05;
+float kd = 80;
+int isDriving;
+uint8_t tempBuffer[20];
+void (*arr[26][26])(void);
+int OverallTimerCounter=0;
+int firstBlackLine=0;
+int PassedBlack=0;
+
+
+void LeftWheel_F(void){ //fast forward
+
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5,2500); //pf1 tied pwm is high on 50% max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_3, GPIO_PIN_3); //turn on pin 3 for enable phase
+
+}
+void LeftWheel_R(void){ //fast reverse
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5,2500); //pf1 tied pwm is high on 50% max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_3, 0); //turn off pin 3 for enable phase
+
+}
+
+void LeftWheel_FF(void){ //slow forward
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5,5000); //pf1 tied pwm is high on max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_3, GPIO_PIN_3); //turn on pin 3 for enable phase
+
+}
+void LeftWheel_RR(void){ //slow reverse
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5,500); //pf1 tied pwm is 10% max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_3, 0); //turn off pin 3 for enable phase
+
+}
+void RightWheel_F(void){ //fast forward
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_4,5000); //pf0 tied pwm is high on max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_5, GPIO_PIN_5); //turn on pin 5 for enable phase
+
+}
+void RightWheel_R(void){ //fast reverse
+
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_4,5000); //pf0 tied pwm is 100% max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_5, 0); //turn off pin 5 for enable phase
+
+}
+
+void RightWheel_FF(void){ //slow forward
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_4,500); //pf0 tied pwm is 10% max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_5, GPIO_PIN_5); //turn on pin 5 for enable phase
+
+}
+void RightWheel_RR(void){ //slow reverse
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_4,500); //pf0 tied pwm is 100% max
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_5, 0); //turn off pin 5 for enable phase
+
+}
+
+void RightWheelPIDSET(float speed){ //ADJUST FORWARD SPEED RIGHT WHEEL
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_4,speed); //pf0 TIED TO WHEEL - speed depends on wheel
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_5, GPIO_PIN_5); //turn ON pin 5 for enable phase
+
+}
+void LeftWheelPIDSET(float speed){ //ADJUST FORWARD SPEED LEFT WHEEL PID
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5,speed); //pf1 tied TO WHEEL - speed depends on pid
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_3, GPIO_PIN_3); //turn ON pin 3 for enable phase
+
+}
+void LeftWheelPIDSETRev(float speed){ //REVERSE LEFT WHEEL
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5,speed); //pf1 tied TO WHEEL
+	GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_3, 0); //turn ON pin 3 for enable phase
+
+}
+
+
+void drive_STOP(void){
+	//stop driving - set both motors to 1 - virtually 0 speed
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5,1);
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_4,1);
+	//if the timer3 has been enabled (i.e. pid has been started) then disable it
+	if (SysCtlPeripheralReady(SYSCTL_PERIPH_TIMER3))
+	{
+		TimerDisable(TIMER3_BASE,TIMER_A); //disable 50ms pid timer
+	}
+	float overallTime = ((float)(TimerValueGet(TIMER4_BASE, TIMER_A)))/(float)14814814;
+	//return the timer 4 count up value
+	//this will give us total runtime since we count up from 0
+
+	if (SysCtlPeripheralReady(SYSCTL_PERIPH_TIMER4))
+	{
+		TimerDisable(TIMER4_BASE,TIMER_A); //disable overall counting timer
+	}
+	char timerSensor[35];
+	char *pt_timerSensor;
+	sprintf(timerSensor, "%f\n", overallTime);
+			//COPY overall timer value into an empty buffer, so we can print its contents
+	pt_timerSensor = timerSensor;
+	while(*pt_timerSensor != '\n'){
+				UARTCharPut(UART3_BASE, *pt_timerSensor);
+				pt_timerSensor++;
+	}//output overall timer value into uart
+
+}
+void postUARTSema(void){
+	Semaphore_post(UARTSEMARX);
+}
+
+void tskfxn(void)
+{
+	//pend uart semaphore, which is posted when the UART RX FIFO
+	//gets 1/8th full - i.e. every 2 characters that the UART receives,
+	//an interrupt will be called, which posts UARTSEMARX and this function runs
+	//while 1 so that we can keep this task running
+	while(1){
+		Semaphore_pend(UARTSEMARX, BIOS_WAIT_FOREVER);
+		//task blocks until UART HWI (2 character RX) posts UARTSEMARX
+
+		UARTCharPut(UART3_BASE, 0x55);
+		//PUT CHARACTER E, THIS VERIFIES THAT WE RECEIVED COMMAND
+		//IT WILL SEND BACK "E" FOR EVERY 2 CHARACTER COMMAND
+
+		unsigned long ulStatus;
+		ulStatus = UARTIntStatus(UART3_BASE, true);
+		UARTIntClear(UART3_BASE, ulStatus);
+		//CAPTURE UART INTERRUPT STATUS, AND CLEAR IT
+		//UART RX INTERRUPT IS SET FOR 1/8 FULL - SO EVERY 2 CHARACTERS
+		//WILL INTERRUPT SO THAT THE UART CAN PROCESS
+
+		while(UARTCharsAvail(UART3_BASE))
+		{
+			//GET THE CHARACTERS FROM THE UART RX FIFO
+			//SINCE WE ENABLED UART RX FIFO, AND SET INTERRUPT LEVEL TO 1/8 (2 CHARS)
+			//THIS MEANS THE FIFO WILL HAVE 2 CHARS FOR EVERY COMMAND WE SEND IT
+			globalcmdbuffer[i] = UARTCharGetNonBlocking(UART3_BASE);
+			//STORE THE 2 CHARACTER COMMAND WE RECEIVED
+			UARTCharPut(UART3_BASE, globalcmdbuffer[i]);
+			//MIRROR BACK THE COMMAND TO VERIFY TO THE USER THAT WE RECEIVED IT
+			i = i+1;
+		}
+		i=0; //RESET I TO 0 SO THAT WE CAN RE-INDEX THE CMD BUFFER
+		if(arr[(int)(globalcmdbuffer[0])-(int)'a'][(int)(globalcmdbuffer[1])-(int)'a']!=0)
+			arr[(int)(globalcmdbuffer[0])-(int)'a'][(int)(globalcmdbuffer[1])-(int)'a']();
+		//CALL THE COMMAND REFERENCED IN THE COMMAND BUFFER ARRAY
+		//I.E., IF WE SEND "ST" TO UART, THIS WILL CALL THE DRIVE STOP COMMAND
+		//we also added in a small fail-safe in case the user calls a command
+		//that is not registered in the void array pointer
+	}
+
+
+}
+
+
+float ReadWall_IR(unsigned long* distance)
+{
+	//TRIGGER ADC0 SEQUENCER 3 - THIS GATHERS 1 SAMPLE
+	//ADC0 CORRESPONDS TO PE3
+	//USE OTHER SEQUENCERS IF WANT TO GATHER MORE SAMPLES
+	ADCProcessorTrigger(ADC0_BASE, 3);
+
+	while(!ADCIntStatus(ADC0_BASE, 3, false))
+	{
+	}//AWAIT THE STATUS OF THE ADC, IT WILL INTERRUPT AFTER IT FIRES
+	ADCIntClear(ADC0_BASE, 3); //CLEAR INTERRUPT AFTER ADC FIRES
+	ADCSequenceDataGet(ADC0_BASE, 3, distance);
+	//GET THE ADC DATA FROM ADC0 BASE, SS3, STORE IT IN DISTANCE
+
+	distanceRC = 3*(distance[0]/(float)4096);
+	distanceRC1 = 2.047 + (22.4/pow((distanceRC+0.4554),2));
+	//ARITHMETIC - CONVERTS ADC VALUE 0-4095 TO CM DISTANCE 4-30CM IDEALLY
+	ADCSequenceEnable(ADC0_BASE, 3);
+	//RE-ENABLE ADC SO THAT WE CAN USE IT AGAIN, SS3
+	return distanceRC1;
+	//RETURN RIGHT SENSOR CM DISTANCE VALUE
+}
+
+float ReadWall_IF(unsigned long* distance)
+{
+	//TRIGGER ADC1 SEQUENCER 3 - THIS GATHERS 1 SAMPLE
+	//ADC1 CORRESPONDS TO PE2
+	//USE OTHER SEQUENCERS IF WANT TO GATHER MORE SAMPLES
+	ADCProcessorTrigger(ADC1_BASE, 3);
+	while(!ADCIntStatus(ADC1_BASE, 3, false))
+	{
+	} //WAIT FOR ADC1 TO BE READY (I.E. DONE CLEARING, INTERRUPT SCHEDULED)
+	ADCIntClear(ADC1_BASE, 3);
+	//CLEAR INTERRUPT AFTER ADC FIRES
+	ADCSequenceDataGet(ADC1_BASE, 3, distance);
+	//STORE ADC VALUE IN DISTANCE BUFFER
+	distanceFC = 3*(distance[0]/(float)4096);
+
+	distanceFC1 = 2.047 + (22.4/pow((distanceFC+0.4554),2));
+	//ARITHMETIC TO CONVERT ADC VALUE (0-4096) INTO CM DISTANCE (4-30CM)
+	ADCSequenceEnable(ADC1_BASE, 3);
+	//RE-ENABLE ADC SO THAT WE CAN FIRE AGAIN
+	return distanceFC1;
+	//RETURN FRONT SENSOR CM DISTANCE
+
+}
+
+void ReadLightW(void)
+{
+	unsigned long ulPeriod;
+	UARTCharPut(UART3_BASE, 'a'); //putchar a - just for testing purposes
+	SysCtlPeripheralEnable( SYSCTL_PERIPH_TIMER1 ); //built in timer 1 enabled
+	SysCtlDelay(3);
+	ulPeriod = 200;
+	TimerConfigure( TIMER1_BASE, TIMER_CFG_ONE_SHOT);
+	//set timer1 for one-shot operation, with a period of 10uS (as indicated by
+	//light sensor datasheet)
+
+	TimerLoadSet(TIMER1_BASE, TIMER_A, ulPeriod -1);
+	//setup the timer load
+	TimerIntEnable(TIMER1_BASE, TIMER_TIMA_TIMEOUT);
+	//enable interrupts - we need to interrupt after the timer fires off
+	//after 10 ms so we can continue with light sensor operation
+	SysCtlDelay(10);
+	GPIOPinTypeGPIOOutput(GPIO_PORTB_BASE, GPIO_PIN_2);
+	//pb2 will now be an output pin
+
+	GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_2, GPIO_PIN_2);
+	//write the sensor high on pb2, this will allow us to measure how long
+	//it takes until the sensor drives back low
+	TimerEnable(TIMER1_BASE, TIMER_TIMA_TIMEOUT);
+	//enable the timer. it will run for 10ms then an interrupt will call Timer2Init
+
+}
+void Timer2Init(void)
+{
+		uint32_t statusWall = 0;
+		statusWall = TimerIntStatus(TIMER1_BASE, true);
+		UARTCharPut(UART3_BASE, 'b'); //testing purposes
+		TimerIntClear(TIMER1_BASE, statusWall);
+		//clear timer1 interrupt
+		TimerDisable( TIMER1_BASE, TIMER_A );
+		//disable timer 1A for now - we dont need it
+		TimerIntDisable(TIMER1_BASE, TIMER_TIMA_TIMEOUT);
+		//disable timer 1A INTERRUPT FOR NOW - NO LONGER NEEDED
+		unsigned long ulperiodTimer2;
+		SysCtlPeripheralEnable( SYSCTL_PERIPH_TIMER2 );
+		//WE NEED A NEW TIMER SO THAT WE CAN MEASURE HOW LONG IT TOOK
+		//FOR THE LIGHT SENSOR TO GO FROM HIGH TO LOW
+		SysCtlDelay(3);
+		ulperiodTimer2 = 148148;
+		//SETUP WITH SOME RANDOM VALUE WHICH SHOULD BE MUCH MORE THAN
+		//THE DATASHEET SUGGESTED TIME FOR HIGH->LOW. THIS VALUE DOESNT
+		//REALLY MATTER SO LONG AS ITS HIGH ENOUGH TO CAPTURE
+		//THE TIME IT TOOK THE SENSOR TO GO HIGH->LOW
+		TimerConfigure( TIMER2_BASE, TIMER_CFG_ONE_SHOT);
+		TimerLoadSet(TIMER2_BASE, TIMER_A, ulperiodTimer2-1);
+		//TIMER2 WILL BE ONE-SHOT CONFIGURED, HERE WE SET-UP THE LOAD
+		GPIOPinTypeGPIOInput(GPIO_PORTB_BASE, GPIO_PIN_2);
+		//WE NEED TO CHANGE PB2 TO INPUT PIN NOW, SO WE CAN READ
+		//AND DETERMINE HOW LONG IT TOOK FOR OUTPUT TO BE DRIVEN LOW
+
+		TimerEnable(TIMER2_BASE,TIMER_A);
+		//ENABLE THE TIMER 2A - NOW WE START LOGGING
+		UARTCharPut(UART3_BASE, 'b'); //TESTING PURPOSES
+		while(GPIOPinRead(GPIO_PORTB_BASE,GPIO_PIN_2)!=0)
+		{
+			resultsLight[0] = ((float)148148 - (float)(TimerValueGet(TIMER2_BASE, TIMER_A)))/(float)14814814;
+		}
+		//KEEP RETURNING TIMER 2 VALUE UNTIL PIN HAS BEEN DRIVEN TO LOW
+		//THIS CONVERSION WILL GIVE US HOW MANY SECONDS IT TOOK (SINCE WE DIVIDE
+		// BY SYSTEM BASE CLOCK)
+		//THIS WILL ALLOW US TO CHECK HOW LONG IT TOOK FOR HIGH->LOW
+		float color = resultsLight[0];
+		//STORE LIGHT SENSOR RESULTS IN A BUFFER
+		char strLightSensor[200];
+		char *pt_strLightSensor;
+		sprintf(strLightSensor, "%f\n", resultsLight[0]);
+		//COPY LIGHT SENSOR INTO an empty buffer, so we can print its contents
+		pt_strLightSensor = strLightSensor;
+		//we use PassedBlack to indicate whether it has passed a black line
+		//i.e., first black line is passed, passedblack = 1, and the
+		//black line counter (firstblackLine) is now 1 and Passedblack=0
+		//second black line passed, now passedBlack=1, and firstBlackLine = 2
+		//since we have passed by 2 black lines now
+		//but since we have 2 black lines passed, robot stops
+		if (color > (float)0.001 && PassedBlack==0)
+		{
+			PassedBlack=1;
+			firstBlackLine=firstBlackLine+1;
+			if (firstBlackLine==2)
+			{
+				drive_STOP();
+				Semaphore_post(UART_Sema);
+			}
+			UARTCharPut(UART3_BASE, 'b');
+		}
+		else if (color > (float)0.001 && PassedBlack==1)
+			//basically, this function handles if the sensor
+
+			//sees black in the middle of us passing the black tape
+			//we don't want to keep indexing black line counter
+			//because the Light Sensor might run a few times while we
+			//are passing the black tape
+				{
+					PassedBlack=0;
+					UARTCharPut(UART3_BASE, 'b');
+				}
+		else
+		{
+			PassedBlack=0;
+			UARTCharPut(UART3_BASE, 'w');
+		} //else means we had a white line, so we keep passedblack=0
+		//so that we can index it to 1 once we see black line
+
+		while(*pt_strLightSensor != '\n'){
+			UARTCharPut(UART3_BASE, *pt_strLightSensor);
+			pt_strLightSensor++;
+		}//print out the sensor high->low time (in seconds) to uart
+}
+
+void UartDebug(void)
+{
+	while(1)
+	{ //wait for the semaphore called by pid function, which will call
+		//the uartdebug every 20 values
+		Semaphore_pend(UART_Sema,BIOS_WAIT_FOREVER);
+
+		//reset temp buffer index, so that we can continue to index it with fresh values
+		countPIDLOOPS=0;//reset pid loop counter to 0, so that
+		//we can continue to call the uartdebug function every 20 values
+		GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, 0);
+		//blue led is off
+		GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+		//green led is on - wont be able to see it, but the blue led
+		//will flash when we are logging
+		char str1[30];
+		char *pt_str1;
+		for (i =0; i < pidLoopDebugcounter; i++)
+		{
+			sprintf(str1, "%d\n\r",tempBuffer[i] ); //copy temp buffer values to
+			//str1 array, formatted with spaces and returns - this makes it
+			//easier for user to read
+			pt_str1 = str1;
+			//use a pointer to run through the copied temp buffer array
+			while(*pt_str1 != '\n'){
+				UARTCharPut(UART3_BASE, *pt_str1);
+				pt_str1++;
+			} //log the str1 (copy of tempbuffer) values until empty -
+			//this will display 20 logged pid values
+			UARTCharPut(UART3_BASE, '\t');
+		}
+		pidLoopDebugcounter = 0;
+		UARTCharPut(UART3_BASE, '\n');
+		UARTCharPut(UART3_BASE, '\r');
+		//add a new line/return for nicer formatting
+		GPIOPinWrite(GPIO_PORTF_BASE,GPIO_PIN_3, 0);
+		GPIOPinWrite(GPIO_PORTF_BASE,GPIO_PIN_2, GPIO_PIN_2);
+		//green led is off, blue led is back on
+	}
+}
+void StartTimer50MS(void){
+	Swi_post(WallTimerFunction);
+	//we decided to use a SWI for this function
+	//because the 50ms drive timer
+	//is an especially sensitive element
+	//so we wanted to guaruntee that it was
+	//properly processed and queued in the BIOS scheduler
+	//thus we would have no potential interrupts
+	//or problems in initializing the PID
+}
+void incOverallCounter(void){
+	OverallTimerCounter+=1;
+}
+void configureWallTimer(void){
+	unsigned long ui32OverallPeriod = 4281480000; //set overall counter timer to 289 seconds
+	SysCtlPeripheralEnable( SYSCTL_PERIPH_TIMER4 ); //enable timer 4
+	TimerConfigure(TIMER4_BASE, TIMER_CFG_ONE_SHOT_UP); //count up
+	TimerLoadSet(TIMER4_BASE, TIMER_A, ui32OverallPeriod);
+		//set timer to ui32OverallPeriod, roughly 289 seconds
+	TimerEnable(TIMER4_BASE,TIMER_A);
+	//since the course should take less than 289 seconds, we should
+	//not worry about the timer4 timeout
+
+	//timer 4, that counts how long it took for us to loop course
+	//need a timer to count up so we can capture total course time
+	//
+
+
+	unsigned long ui32Period;
+	//this function starts pid. it will use a periodic timer that reloads every 50ms
+	//each time the timer runs out, it interrupts and calls timerIntHandlerPID below
+	//periodic operation so that it reloads automatically
+	SysCtlPeripheralEnable( SYSCTL_PERIPH_TIMER3 );
+	//enable timer 3 - going to be used for PID
+	SysCtlDelay(6);
+	ui32Period = (740740); //set period to 50 ms
+	TimerConfigure(TIMER3_BASE, TIMER_CFG_PERIODIC);
+	//timer 3 will be periodic until disabled by the drive stop UART command
+	//or by a second black line (indicating finish line)
+	TimerLoadSet(TIMER3_BASE, TIMER_A, ui32Period);
+	//set timer load to the 50 ms period
+	TimerIntEnable(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
+	//we need the timer to interrupt so we can call pid handler every 50 ms
+	TimerEnable(TIMER3_BASE,TIMER_A);
+	//enable the timer, after 50 ms this will call timerIntHandlerPID
+}
+void timerIntHandlerPID(void){
+	//PingPongBufferSelector=((PingPongBufferSelector+1)%2);
+	countPIDLOOPS=countPIDLOOPS+1;
+	//INDEX NUMBER OF TIMES PID RUNS - IMPORTANT FOR UART LOGGING
+	uint32_t status=0;
+	status = TimerIntStatus(TIMER3_BASE,true);
+	TimerIntClear(TIMER3_BASE,status);
+	//TIMER 3 SCHEDULED AS PERIODIC, FIRES EVERY 50MS. THE TIMER INTERRUPT
+	//WILL CALL THIS FUNCTION. HENCE WE NEED TO CLEAR THE INTERRUPT BEFORE PROCEEDING
+	ReadWall_IR(distanceR); //READ RIGHT SENSOR
+	ReadWall_IF(distanceF); //READ FRONT SENSOR
+	if (distanceFC1 < 12.0)
+	{
+		RightWheelPIDSET(5000);
+		LeftWheelPIDSETRev(5000);
+
+		while(distanceFC1 < 12.0)
+		{
+			ReadWall_IF(distanceF);
+		}
+
+	} //IF THE FRONT SENSOR IS <12CM I.E. TOO CLOSE, WE NEED TO
+	//TURN 360 DEGREES, SO WE KEEP TURNING UNTIL THE FRONT SENSOR DISTANCE
+	//HAS DROPPED TO >12 CM - I.E. WHEN WE HAVE CLEARED THE DEAD END
+
+	properror = distanceRC1 - WallSetPoint; //error = sampled value - set point
+	intError = intError + properror; //sum all error signals for integral
+	derError = properror - prevErrorValue; 	 // e(t) - e(t-1) for derivative term
+	 //adjust e(t-1) -> e(t) for derrivative
+    curP = kp*properror; //P TERM
+    curI = ki*(intError); //I TERM
+    curD = kd*(derError); //D TERM
+	speedCorrection = curP + curI + curD;
+	//P+I+D WILL BE HOW WE CORRECT OUR WHEEL SPEED.
+	//WE WILL USE A BASE OF 2500 (50% SPEED) FOR BOTH WHEELS, AND SUM speedCorrection
+	//to both right and left wheel speeds to get them to change directions
+	//this is known as differential driving.
+	if(speedCorrection > 2500)
+    	speedCorrection = 2499;
+    if(speedCorrection < -2500)
+        	speedCorrection = -2499;
+    //we cant give the PWM a negative or too high of a value, so if the value
+    //is too large, we need to cap it so that the pwm received period is
+    //between 0 and 5000 clock cycles, as we had set it up earlier
+    if (properror > 0.15 || properror < -0.15)
+    {
+	leftWheelSpeed = 2500 + speedCorrection;
+	rightWheelSpeed = 2500 - speedCorrection;
+	//if the error is higher than 0.15 cm, we need to use pid to adjust
+	//the left and right wheel speeds
+    }
+    else //if the error is <0.15 cm, we can just follow straight at full speed
+    {
+    	leftWheelSpeed = 4000;
+    	rightWheelSpeed = 4000;
+    }
+    prevErrorValue = properror; //change error for derivative term
+    //e(t)-e(t-1) so we need to keep changing e(t-1) to previous error value
+    if (countPIDLOOPS%2==0) //every second pid reading, we will index the tempBuffer
+    	//which will store the distance value as an integer for that reading
+    {
+    	pidLoopDebugcounter=pidLoopDebugcounter+1;
+    	tempBuffer[pidLoopDebugcounter-1] = abs((int)(properror));
+
+    }
+    //if the buffer gets filled up (20 readings), call semaphore_post(uart_sema) which unblocks
+    //the uart logging task
+    if (pidLoopDebugcounter == 20){
+    	Semaphore_post(UART_Sema);
+    }
+
+}
+
+
+void ReadWall_IRWrapper(void)
+{
+	ReadWall_IR(distanceR); //void wrapper function for functions that take non void param
+}
+void ReadWall_IFWrapper(void)
+{
+	ReadWall_IF(distanceF); //void wrapper function for functions that take non void param
+}
+void ReadLightWrapper(void)
+{
+	ReadLightW(); //void wrapper function for functions that take non void param
+}
+
+
+
+void setupCommands(void)
+{
+		int a, b;
+	    //Initialize Table with null pointers - necessary for later
+		//fail-safe code checking
+	    for(a = 0; a < 26; a++)
+	        for(b = 0; b < 26; b++)
+	            arr[a][b] = 0;
+
+		arr[(int)'i'-(int)'a'][(int)'f'-(int)'a'] = ReadWall_IFWrapper; //if corresponds to readwall_if (front sensor)
+		arr[(int)'i'-(int)'a'][(int)'r'-(int)'a'] = ReadWall_IRWrapper;//ir corresponds to readwall_ir (right sensor)
+		arr[(int)'r'-(int)'a'][(int)'l'-(int)'a'] = ReadLightW; //rl corresponds to read the light sensor
+
+		arr[(int)'l'-(int)'a'][(int)'f'-(int)'a'] = LeftWheel_F;   //indexing the "fast forward" function to void pointer array
+		arr[(int)'s'-(int)'a'][(int)'l'-(int)'a'] = LeftWheel_FF; //indexing the "slow forward" function to void pointer array
+		arr[(int)'l'-(int)'a'][(int)'r'-(int)'a'] = LeftWheel_R; //indexing the "fast rev" function to void pointer array
+		arr[(int)'l'-(int)'a'][(int)'s'-(int)'a'] = LeftWheel_RR;  //inde xing the "slow reverse" function to void pointer array
+
+
+
+		arr[(int)'r'-(int)'a'][(int)'f'-(int)'a'] = RightWheel_F; //indexing the "fast forward" function to void pointer array
+		arr[(int)'s'-(int)'a'][(int)'f'-(int)'a'] = RightWheel_FF; //indexing the "slow forward" function to void pointer array
+		arr[(int)'r'-(int)'a'][(int)'r'-(int)'a'] = RightWheel_R; //indexing the "fast rev" function to void pointer array
+		arr[(int)'s'-(int)'a'][(int)'r'-(int)'a'] = RightWheel_RR; //indexing the "slow reverse" function to void pointer array
+
+		arr[(int)'s'-(int)'a'][(int)'t'-(int)'a'] = drive_STOP; //indexing drive stop to st
+		arr[(int)'p'-(int)'a'][(int)'d'-(int)'a'] = StartTimer50MS; //indexing for PID Start
+		//the wall timer function (Which initiates pid) to pd
+}
+void UARTSetupEnable(void)
+{
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
+	//enable gpio port c - this will be used for uart3
+	while(!(SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOC)))
+						{
+						;
+						} //wait for port c to be ready
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_UART3);
+	//enable uart 3
+	while(!(SysCtlPeripheralReady(SYSCTL_PERIPH_UART3)))
+				{
+				;
+				} //wait for uart3 to be ready
+	GPIOPinConfigure(GPIO_PC6_U3RX); //pc6 will be uart3 rx
+	SysCtlDelay(100); //delay
+	GPIOPinConfigure(GPIO_PC7_U3TX); //pc7 will be uart3 tx
+	SysCtlDelay(100); //delay
+	GPIOPinTypeUART(GPIO_PORTC_BASE, GPIO_PIN_6 | GPIO_PIN_7);
+	//configure pins to be uart, pc6 and pc7
+	SysCtlDelay(100);//delay
+	UARTConfigSetExpClk(UART3_BASE, SysCtlClockGet(), 115200,
+		(UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE));
+	//setup uart params. baud rate will be 115,200 based on system clock
+	//bit length is 8, 1 stop bit, and no parity bits
+	IntMasterEnable(); //Enables the processor interrupts
+	IntEnable(INT_UART3); //enable interrupts on uart3
+	UARTEnable(UART3_BASE); //enable uart3
+	UARTIntEnable(UART3_BASE, UART_INT_RX);//we want to interrupt for rx (to receive
+		// the 2 character commands)
+	UARTFIFOEnable(UART3_BASE); //ENABLE FIFO for uart, necessary for interrupts
+	UARTFIFOLevelSet(UART3_BASE,UART_FIFO_TX1_8,UART_FIFO_RX1_8); //SET FIFO INTERRUPT LEVEL
+		//we want 2 character interrupt for rx. fifo is 16 bytes, so we use 16/8 = 2 char interrupt
+
+}
+
+void LEDPinEnable(void){
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
+	GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_2);
+	GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_3);
+	//enable PIN F2 AND PIN F3 FOR the leds - blue and green
+}
+void pwmEnable(void){
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM1); //enable internal pwm module, pwm1
+	SysCtlPWMClockSet(SYSCTL_PWMDIV_64); //divide base system clock by 64, so PWM clock is set at 231 kHz
+		//BECAUSE BASE SYSTEM CLOCK IS 14.814 MHZ
+
+
+		 //enable internal led pins for blue and green leds, for data logging
+
+	HWREG(GPIO_PORTF_BASE + GPIO_O_LOCK) = GPIO_LOCK_KEY;
+	HWREG(GPIO_PORTF_BASE + GPIO_O_CR) |= 0x01;
+		//UNLOCK PORT F0 pin, because it is tied to internal NMI
+		//nmi is an interrupt that CANNOt be ignored, generally used for
+		//big hardware faults/ problems. this case we don't need it
+
+	GPIOPinConfigure(GPIO_PF0_M1PWM4);
+	GPIOPinConfigure(GPIO_PF1_M1PWM5);
+		//GPIOPinConfigure(GPIO_PF2_M1PWM6);
+		//GPIOPinConfigure(GPIO_PF3_M1PWM7);
+		/*^This function configures to use a specific pin on the PWM module. GPIO_PF0_M1PWM4 reads
+		as GPIO pin F0, PWM module 1 pin 4. This ties the pin 4 output of the PWM module to the
+		GPIO pin f0.*/
+
+	GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_0 | GPIO_PIN_1);
+		//configure pf0 and pf1 as pwm pins
+
+		//Next is to enable the pulse width modulation functionality within the microcontroller.
+	PWMGenConfigure(PWM1_BASE, PWM_GEN_2, PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);	//logical OR
+		/*^This function configures the PWM generator on the module. The generator creates the pulses
+		needed for PWM output. PWM1_BASE is the base of the module being used. PWM_GEN_2 is
+		the generator for the module tied to PMW pins 4 and 5, */
+
+
+	PWMGenPeriodSet(PWM1_BASE, PWM_GEN_2, 5000);
+		/*^This function sets the period of the PWM output. PWM1_BASE is the base of the module being
+		used. PWM_GEN_2 is the generator for the module tied to PMW pins 4 and 5. 5000 in this example is the peFriod, measured in clock ticks. 400 would be 400
+		clock ticks as a period.*/
+
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_4, 1);
+	PWMPulseWidthSet(PWM1_BASE, PWM_OUT_5, 1);
+		/*^This function sets the pulse width, or duty cycle of the output to the PWM pins. PWM1_BASE is
+		the base of the module being used. PWM_OUT_4 is the PWM output to modify, which is tied to
+		a pin. 1 is the clock ticks of the width of the pulse. 1 would be a 1/5000 duty cycle for the 400
+		clock tick period - this value will be changed as certain motor functions are called.*/
+
+	PWMGenEnable(PWM1_BASE, PWM_GEN_2);
+		//PWMGenEnable(PWM1_BASE, PWM_GEN_3);
+		/*^This function enables the PWM generator. Now that the previous values have been set, the
+		generator may now be turned on. PWM1_BASE is the base of the module being used.
+		PWM_GEN_2 is the generator for the module tied to PMW pins 4 and 5, PWM_GEN_3 is for
+		pins 6 and 7.*/
+
+	PWMOutputState(PWM1_BASE, (PWM_OUT_4_BIT | PWM_OUT_5_BIT), true);
+
+		/*This function enables the PWM module to start modify the pins set for PWM output. With all of
+		the previous values set, the output to the physical pins of the microcontroller can be turned on.
+		PWM1_BASE is the base of the module being used. PWM_OUT_4_BIT | PWM_OUT_5_BIT |
+		are the bits needed to OR together for this single
+		value. true or false in the last field determines if the signal is enabled or disabled.*/
+
+}
+void MotorEnableBitsSetup(){
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+		while(!(SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOB)))
+				{
+				;
+				}
+		//initialize GPIO PORT B, WILL BE USED FOR MOTOR DRIVER REQUIRED INPUTS
+		//enable gpiob and wait for it to be ready
+		GPIOPinTypeGPIOOutput(GPIO_PORTB_BASE, GPIO_PIN_7); //ENABLE GPIO PIN 7 AS OUT
+		GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_7,GPIO_PIN_7); //SET PB7 HIGH FOR PHASE MODE FOR MOTOR DRIVER
+		GPIOPinTypeGPIOOutput(GPIO_PORTB_BASE, GPIO_PIN_6); //ENABLE PB6
+		GPIOPinWrite(GPIO_PORTB_BASE,GPIO_PIN_6, GPIO_PIN_6); //SET PB6 HIGH FOR LOGIC LEVEL INPUT FOR MOTOR DRIVER
+		GPIOPinTypeGPIOOutput(GPIO_PORTB_BASE, GPIO_PIN_3); //ENABLE PB3
+		//xenable bit for motor 1 -WILL BE CHANGED DEPENDING ON MOTOR DIRECTIONS
+		GPIOPinTypeGPIOOutput(GPIO_PORTB_BASE, GPIO_PIN_5);
+		//xenable bit for motor 2 - WILL BE CHANGED DEPENDING ON MOTOR DIRECTIONS
+		SysCtlDelay(25); //DELAY SLIGHTLY
+}
+void ADCSetup(void){
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+		//ENABLE GPIO E, USING PINS 2 AND 3 FOR ADC
+	    SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+	    //ENABLE ADC0 MODULE
+	    GPIOPinTypeADC(GPIO_PORTE_BASE,GPIO_PIN_3);
+	    //CONFIGURE GPIO PE2 TO ADC1 (from datasheet)
+	    SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC1);
+	    //ENABLE ADC1 MODULE
+		GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_2);
+		//CONFIGURE GPIO PE3 TO ADC0 (from datasheet)
+	    ADCSequenceDisable(ADC0_BASE, 3);
+	    //DISABLE ADC WHILE CONFIGURING
+	    ADCSequenceDisable(ADC1_BASE, 3);
+	    //disable ADC WHILE CONFIGURING
+	    ADCReferenceSet(ADC0_BASE, ADC_REF_INT);
+	    //SET ADC0 REF TO 3V INTERNAL
+	    ADCReferenceSet(ADC1_BASE, ADC_REF_INT);
+	    //SET ADC1 REF TO 3V INTERNAL
+	    ADCSequenceConfigure(ADC0_BASE, 3, ADC_TRIGGER_PROCESSOR, 0);
+	    //ADC0 CONFIGURED TO USE SS3 (1 BYTE DEEP FIFO) - TRIGGERED BY PROCESSOR WITH PRIORITY 0
+	    ADCSequenceConfigure(ADC1_BASE, 3, ADC_TRIGGER_PROCESSOR, 0);
+	    //ADC1 CONFIGURED TO USE SS3 (1 BYTE DEEP FIFO) - TRIGGERED BY PROCESSOR WITH PRIORITY 0
+	    ADCSequenceStepConfigure(ADC0_BASE, 3, 0, ADC_CTL_CH0| ADC_CTL_IE |
+	            ADC_CTL_END);
+	    //Configure STEP SEQUENCER FOR ADC0 - CHANNEL 0 IS SAMPLED, AND INTERRUPT IS
+	    //GENERATED WHEN STEP IS COMPLETED (ADC_CTL_IE)
+	    //SINCE WE ONLY HAVE 1 STEP (1 DEPTH FIFO), THIS STEP WILL BE THE FIRST AND LAST STEP IN THE SEQUENCE
+	    //(ADC_CTL_IE)
+	    ADCSequenceStepConfigure(ADC1_BASE, 3, 0, ADC_CTL_CH1| ADC_CTL_IE |
+	            ADC_CTL_END);
+	    //Configure STEP SEQUENCER FOR ADC1 - CHANNEL 1 IS SAMPLED, AND INTERRUPT IS
+	     //GENERATED WHEN STEP IS COMPLETED (ADC_CTL_IE)
+	      //SINCE WE ONLY HAVE 1 STEP (1 DEPTH FIFO), THIS STEP WILL BE THE FIRST AND LAST STEP IN THE SEQUENCE
+	        //(ADC_CTL_IE)
+	    ADCSequenceEnable(ADC0_BASE, 3);
+	    //ENABLE THE ADC SEQUENCE ON SS3 FOR ADC1
+	    ADCIntClear(ADC0_BASE, 3);
+	    //CLEAR ADC INTERRUPT TO PREPARE ADC FOR NEXT FIRING
+	    ADCSequenceEnable(ADC1_BASE, 3);
+	    //ENABLE THE ADC SEQUENCE ON SS3 FOR ADC0
+	    ADCIntClear(ADC1_BASE, 3);
+	    //CLEAR ADC INTERRUPT TO PREPARE ADC FOR NEXT FIRING
+}
+int main(void){
+	setupCommands(); //initialize void array pointer commands
+	SysCtlClockSet(SYSCTL_SYSDIV_13_5 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ); //Clock is set at 14.8 MHz
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+		while(!(SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOD)))
+					{
+					;
+					}
+		//gpio d ENABLED for light sensor pin 1
+	LEDPinEnable(); //enable blue/green leds for data logging
+	pwmEnable(); //setup pwm for motor drivers
+	MotorEnableBitsSetup(); //setup motor enable bits
+	UARTSetupEnable(); //setup uart with interrupts
+	ADCSetup(); //setup adc for sensor acquisition
+    BIOS_start(); //start BIOS
+}
